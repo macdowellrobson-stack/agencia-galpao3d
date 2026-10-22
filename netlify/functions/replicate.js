@@ -19,39 +19,52 @@ export default async (req) => {
       });
     }
 
-    const response = await fetch("https://api.replicate.com/v1/models/bria/product-photography/predictions", {
+    // 1. Criar predição no modelo oficial de composição de produto / inpainting
+    const createRes = await fetch("https://api.replicate.com/v1/predictions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "Prefer": "wait"
+        "Authorization": `Bearer ${token.trim()}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
+        // Modelo flux-schnell / inpainting otimizado para staging de produto
+        version: "55360383cb767929a0812d496a84592233c7c2514bc7c2da4a896d8e87d49818",
         input: {
+          prompt: prompt,
           image: image,
-          prompt: prompt
+          num_outputs: 1,
+          output_format: "jpg"
         }
       })
     });
 
-    const prediction = await response.json();
+    const prediction = await createRes.json();
 
-    if (prediction.error) {
-      return new Response(JSON.stringify({ error: prediction.error }), {
+    if (prediction.error || prediction.detail) {
+      const msg = prediction.error || prediction.detail || "Erro ao iniciar predição no Replicate";
+      return new Response(JSON.stringify({ error: msg }), {
+        status: 400,
+        headers: { ...headers, "Content-Type": "application/json" }
+      });
+    }
+
+    if (!prediction.urls || !prediction.urls.get) {
+      return new Response(JSON.stringify({ error: "Resposta inválida da API do Replicate." }), {
         status: 500,
         headers: { ...headers, "Content-Type": "application/json" }
       });
     }
 
+    // 2. Aguardar conclusão da geração
     let result = prediction;
     let attempts = 0;
 
-    while (result.status !== "succeeded" && result.status !== "failed" && attempts < 30) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const poll = await fetch(result.urls.get, {
-        headers: { "Authorization": `Bearer ${token}` }
+    while (result.status !== "succeeded" && result.status !== "failed" && attempts < 40) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const pollRes = await fetch(result.urls.get, {
+        headers: { "Authorization": `Bearer ${token.trim()}` }
       });
-      result = await poll.json();
+      result = await pollRes.json();
       attempts++;
     }
 
@@ -62,7 +75,8 @@ export default async (req) => {
         headers: { ...headers, "Content-Type": "application/json" }
       });
     } else {
-      return new Response(JSON.stringify({ error: "Tempo limite esgotado" }), {
+      const failureReason = result.error || "A renderização excedeu o tempo limite.";
+      return new Response(JSON.stringify({ error: failureReason }), {
         status: 500,
         headers: { ...headers, "Content-Type": "application/json" }
       });
