@@ -19,20 +19,19 @@ export default async (req) => {
       });
     }
 
-    // 1. Criar predição no modelo oficial de composição de produto / inpainting
-    const createRes = await fetch("https://api.replicate.com/v1/predictions", {
+    // Chamada oficial ao endpoint canónico do modelo (versão automática estável)
+    const createRes = await fetch("https://api.replicate.com/v1/models/black-forest-labs/flux-fill-dev/predictions", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token.trim()}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Prefer": "wait=55"
       },
       body: JSON.stringify({
-        // Modelo flux-schnell / inpainting otimizado para staging de produto
-        version: "55360383cb767929a0812d496a84592233c7c2514bc7c2da4a896d8e87d49818",
         input: {
           prompt: prompt,
           image: image,
-          num_outputs: 1,
+          guidance: 30,
           output_format: "jpg"
         }
       })
@@ -41,34 +40,44 @@ export default async (req) => {
     const prediction = await createRes.json();
 
     if (prediction.error || prediction.detail) {
-      const msg = prediction.error || prediction.detail || "Erro ao iniciar predição no Replicate";
+      const msg = prediction.error || prediction.detail || "Erro ao iniciar no Replicate";
       return new Response(JSON.stringify({ error: msg }), {
         status: 400,
         headers: { ...headers, "Content-Type": "application/json" }
       });
     }
 
-    if (!prediction.urls || !prediction.urls.get) {
-      return new Response(JSON.stringify({ error: "Resposta inválida da API do Replicate." }), {
+    // Se o Replicate já devolver o resultado concluído
+    if (prediction.status === "succeeded" && prediction.output) {
+      const outputUrl = Array.isArray(prediction.output) ? prediction.output[0] : prediction.output;
+      return new Response(JSON.stringify({ output: outputUrl }), {
+        status: 200,
+        headers: { ...headers, "Content-Type": "application/json" }
+      });
+    }
+
+    // Polling caso o processamento demore alguns segundos
+    let result = prediction;
+    let attempts = 0;
+    const pollUrl = prediction.urls?.get;
+
+    if (!pollUrl) {
+      return new Response(JSON.stringify({ error: "URL de consulta não recebido da Replicate." }), {
         status: 500,
         headers: { ...headers, "Content-Type": "application/json" }
       });
     }
 
-    // 2. Aguardar conclusão da geração
-    let result = prediction;
-    let attempts = 0;
-
-    while (result.status !== "succeeded" && result.status !== "failed" && attempts < 40) {
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-      const pollRes = await fetch(result.urls.get, {
+    while (result.status !== "succeeded" && result.status !== "failed" && attempts < 35) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const pollRes = await fetch(pollUrl, {
         headers: { "Authorization": `Bearer ${token.trim()}` }
       });
       result = await pollRes.json();
       attempts++;
     }
 
-    if (result.status === "succeeded") {
+    if (result.status === "succeeded" && result.output) {
       const outputUrl = Array.isArray(result.output) ? result.output[0] : result.output;
       return new Response(JSON.stringify({ output: outputUrl }), {
         status: 200,
